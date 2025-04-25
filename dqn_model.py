@@ -1,7 +1,7 @@
 # model.py
 import torch
 import torch.nn as nn
-
+import numpy as np
 class DQN(nn.Module):
     """
     Classic Atari‑style CNN from the DQN paper.
@@ -32,11 +32,25 @@ class DQN(nn.Module):
 
     def forward(self, x):
                  # scale 0‑255 → 0‑1
+        if isinstance(x, np.ndarray):
+            x = torch.from_numpy(x)
+        
+        # 確保張量在正確的設備上
+        device = next(self.parameters()).device
+        if x.device != device:
+            x = x.to(device)
+        
+        # 添加批次維度（如果缺少）
+        if x.dim() == 3:
+            x = x.unsqueeze(0)
+        
+        # 縮放 0-255 → 0-1
         if x.dtype != torch.float32:
             x = x.float() / 255.0
-            
-        x = self.conv(x)
         
+        # 前向傳播
+        x = self.conv(x)
+        # print(x.shape)
         ## compress x [ channel, width, height] into one vector and remains batch dimension
         # print(x.shape)
         # print(x.view(x.size(0), -1).shape)

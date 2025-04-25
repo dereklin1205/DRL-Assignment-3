@@ -25,9 +25,14 @@ START_EPS    = 1.0
 END_EPS      = 0.05
 EPS_DECAY_FR = 1_000_000      # frames over which ε decays
 MAX_FRAMES   = 10000000      # total env steps
-SAVE_EVERY   = 100_000        # save weights every … steps
-
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+epsilon_decay_rate = 0.9999995
+SAVE_EVERY   = 100        # save weights every … steps
+if torch.cuda.is_available():
+    device = torch.device("cuda")
+elif torch.backends.mps.is_available():
+    device = torch.device("mps")
+else:
+    device = torch.device("cpu")
 
 # ────────────────────────────── Utilities ─────────────────────────────
 Transition = collections.namedtuple(
@@ -51,9 +56,9 @@ def make_env():
     env = GrayScaleObservation(env, keep_dim=True)    # (240,256,1)
     env = ResizeObservation(env, 84)                  # (84,84,1)
     try:
-        env = FrameStack(env, 32, enable_lazy=True)   # gym >= 0.26 / gymnasium
+        env = FrameStack(env, 4, enable_lazy=True)   # gym >= 0.26 / gymnasium
     except TypeError:
-        env = FrameStack(env, 32)  
+        env = FrameStack(env, 4)  
       # (84,84,4) lazy frames
     return env
 
@@ -66,14 +71,15 @@ def obs_to_state(obs):
     # print(state.shape)
     # print(np.transpose(state, (2,0,1,3)).shape)
     #(4,84,84,1)
+    
     new_state = np.transpose(state, (3,0,1,2))
     return new_state   # C,H,W
 
 # ────────────────────────────── Training ──────────────────────────────
 def train(path_policy=None, path_target=None):
     def reload_and_train(path_policy, path_target):
-        policy_net = DQN(32, n_actions).to(device)
-        target_net = DQN(32, n_actions).to(device)
+        policy_net = DQN(4, n_actions).to(device)
+        target_net = DQN(4, n_actions).to(device)
         if path_policy:
             # Load the pre-trained model for the policy network
             policy_net.load_state_dict(torch.load(path_policy, map_location=device))
@@ -90,8 +96,8 @@ def train(path_policy=None, path_target=None):
     if args.policy and args.target:
         policy_net, target_net = reload_and_train(args.policy, args.target)
     else:
-        policy_net  = DQN(32, n_actions).to(device)
-        target_net  = DQN(32, n_actions).to(device)
+        policy_net  = DQN(4, n_actions).to(device)
+        target_net  = DQN(4, n_actions).to(device)
         target_net.load_state_dict(policy_net.state_dict())
         target_net.eval()
 
@@ -104,52 +110,55 @@ def train(path_policy=None, path_target=None):
     episode_reward = 0
     episode        = 1
     all_scores     = []
-
-    progress = trange(MAX_FRAMES, dynamic_ncols=True, desc="Training", unit="frame")
-    for frame_idx in progress:
+    progress = trange(5000, dynamic_ncols=True, desc="Training", unit="episode")
+    eps = START_EPS
+    frame = 0
+    for episode in progress:
         # ε‑greedy schedule
-        eps = END_EPS + (START_EPS - END_EPS) * np.exp(-1. * frame_idx / EPS_DECAY_FR)
-        if random.random() < eps:
-            action = env.action_space.sample()
-        else:
-            with torch.no_grad():
-                s = torch.from_numpy(state).to(device)
-                q = policy_net(s)
-                action = q.argmax(1).item()
-        next_obs, reward, done, info = env.step(action)
-        next_state = obs_to_state(next_obs)
-        memory.push(state, action, reward, next_state, done)
-
-        state  = next_state
-        episode_reward += reward
-
+        done = 0
+        curr_frame = 0
+        
+        while not done and curr_frame < 10000:
+            frame += 1
+            # print(frame)
+            curr_frame += 1
+            
+            if random.random() < eps:
+                action = env.action_space.sample()
+            else:
+                with torch.no_grad():
+                    # s = torch.from_numpy(state).to(device)
+                    q = policy_net(state)
+                    action = q.argmax(1).item()
+            next_obs, reward, done, info = env.step(action)
+            next_state = obs_to_state(next_obs)
+            memory.push(state, action, reward, next_state, done)
+            state  = next_state
+            episode_reward += reward
         # Optimize after enough warm‑up
-        if len(memory) >= 100000 and frame_idx % 4 == 0:
-            transitions = memory.sample(BATCH_SIZE)
-            batch_state   = torch.from_numpy(np.stack(transitions.state)).to(device)
-            batch_action  = torch.tensor(transitions.action, dtype=torch.long, device=device).unsqueeze(1)
-            batch_reward  = torch.tensor(transitions.reward, dtype=torch.float32, device=device)
-            batch_next    = torch.from_numpy(np.stack(transitions.next_state)).to(device)
-            batch_done    = torch.tensor(transitions.done, dtype=torch.bool, device=device)
-            ## batch state squeeze the second dimension [32,1,4,84,84] to [32,4,84,84]
-            batch_state   = batch_state.squeeze(1)
-            batch_next    = batch_next.squeeze(1)
-            q_values      = policy_net(batch_state).gather(1, batch_action).squeeze(1)
-            
-            with torch.no_grad():
-                next_q     = target_net(batch_next).max(1)[0]
-                target_q   = batch_reward + GAMMA * next_q * (~batch_done)
-            
-            loss = nn.SmoothL1Loss()(q_values, target_q)
-            optimizer.zero_grad()
-            loss.backward()
-            nn.utils.clip_grad_norm_(policy_net.parameters(), 10.0)
-            optimizer.step()
-
-        # Target network sync
-        if frame_idx % TARGET_SYNC == 0:
-            target_net.load_state_dict(policy_net.state_dict())
-
+            if len(memory) >= BATCH_SIZE*100:
+                transitions = memory.sample(BATCH_SIZE)
+                batch_state   = torch.from_numpy(np.stack(transitions.state)).to(device)
+                batch_action  = torch.tensor(transitions.action, dtype=torch.long, device=device).unsqueeze(1)
+                batch_reward  = torch.tensor(transitions.reward, dtype=torch.float32, device=device)
+                batch_next    = torch.from_numpy(np.stack(transitions.next_state)).to(device)
+                batch_done    = torch.tensor(transitions.done, dtype=torch.bool, device=device)
+                ## batch state squeeze the second dimension [32,1,4,84,84] to [32,4,84,84]
+                batch_state   = batch_state.squeeze(1)
+                batch_next    = batch_next.squeeze(1)
+                q_values      = policy_net(batch_state).gather(1, batch_action).squeeze(1)
+                with torch.no_grad():
+                    next_q     = target_net(batch_next).max(1)[0]
+                    target_q   = batch_reward + GAMMA * next_q * (~batch_done)
+                loss = nn.SmoothL1Loss()(q_values, target_q)
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+                # print("1232")
+            # Target network sync
+            if frame % TARGET_SYNC == 0:
+                target_net.load_state_dict(policy_net.state_dict())
+            eps = max(END_EPS, eps * epsilon_decay_rate)
         # Episode bookkeeping
         if done:
             all_scores.append(episode_reward)
@@ -163,10 +172,73 @@ def train(path_policy=None, path_target=None):
             state= env.reset()
             state    = obs_to_state(state)
             episode_reward = 0
-
         # Autosave
-        if (frame_idx+1) % SAVE_EVERY == 0:
+        if (episode+1) % SAVE_EVERY == 0:
             torch.save(policy_net.state_dict(), "mario_dqn.pth")
+        # Epsilon decay
+        
+    # progress = trange(MAX_FRAMES, dynamic_ncols=True, desc="Training", unit="frame")
+    
+    # for frame_idx in progress:
+    #     # ε‑greedy schedule
+    #     eps = END_EPS + (START_EPS - END_EPS) * np.exp(-1. * frame_idx / EPS_DECAY_FR)
+    #     if random.random() < eps:
+    #         action = env.action_space.sample()
+    #     else:
+    #         with torch.no_grad():
+    #             s = torch.from_numpy(state).to(device)
+    #             q = policy_net(s)
+    #             action = q.argmax(1).item()
+    #     next_obs, reward, done, info = env.step(action)
+    #     next_state = obs_to_state(next_obs)
+    #     memory.push(state, action, reward, next_state, done)
+
+    #     state  = next_state
+    #     episode_reward += reward
+
+    #     # Optimize after enough warm‑up
+    #     if len(memory) >= BATCH_SIZE:
+    #         transitions = memory.sample(BATCH_SIZE)
+    #         batch_state   = torch.from_numpy(np.stack(transitions.state)).to(device)
+    #         batch_action  = torch.tensor(transitions.action, dtype=torch.long, device=device).unsqueeze(1)
+    #         batch_reward  = torch.tensor(transitions.reward, dtype=torch.float32, device=device)
+    #         batch_next    = torch.from_numpy(np.stack(transitions.next_state)).to(device)
+    #         batch_done    = torch.tensor(transitions.done, dtype=torch.bool, device=device)
+    #         ## batch state squeeze the second dimension [32,1,4,84,84] to [32,4,84,84]
+    #         batch_state   = batch_state.squeeze(1)
+    #         batch_next    = batch_next.squeeze(1)
+    #         q_values      = policy_net(batch_state).gather(1, batch_action).squeeze(1)
+            
+    #         with torch.no_grad():
+    #             next_q     = target_net(batch_next).max(1)[0]
+    #             target_q   = batch_reward + GAMMA * next_q * (~batch_done)
+            
+    #         loss = nn.SmoothL1Loss()(q_values, target_q)
+    #         optimizer.zero_grad()
+    #         loss.backward()
+    #         optimizer.step()
+
+    #     # Target network sync
+    #     if frame_idx % TARGET_SYNC == 0:
+    #         target_net.load_state_dict(policy_net.state_dict())
+
+    #     # Episode bookkeeping
+    #     if done:
+    #         all_scores.append(episode_reward)
+    #         progress.set_postfix(
+    #             ep=episode,
+    #             score=episode_reward,
+    #             avg_100=np.mean(all_scores[-100:]),
+    #             eps=f"{eps:.02f}"
+    #         )
+    #         episode += 1
+    #         state= env.reset()
+    #         state    = obs_to_state(state)
+    #         episode_reward = 0
+
+    #     # Autosave
+    #     if (frame_idx+1) % SAVE_EVERY == 0:
+    #         torch.save(policy_net.state_dict(), "mario_dqn.pth")
 
     # Final save
     torch.save(policy_net.state_dict(), "mario_dqn.pth")

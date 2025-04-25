@@ -1,56 +1,55 @@
-# model.py
 import torch
 import torch.nn as nn
-import numpy as np
+import torch.nn.functional as F
+
 class DDQN(nn.Module):
     """
-    Classic Atari‑style CNN from the DQN paper.
-    Input  : (N, 4, 84, 84)  – four stacked grayscale frames
-    Output : Q‑values for each discrete action
+    Dueling Double DQN architecture with convolutional layers
     """
-    def __init__(self, in_ch: int, n_actions: int):
-        super().__init__()
+    def __init__(self, input_shape, n_actions):
+        super(DDQN, self).__init__()
+        
+        # Convolutional layers
         self.conv = nn.Sequential(
-            nn.Conv2d(in_ch, 32, kernel_size=8, stride=2), 
+            nn.Conv2d(input_shape, 32, kernel_size=8, stride=4),
             nn.ReLU(),
-            nn.Conv2d(32, 64, kernel_size=4, stride=2),    
+            nn.Conv2d(32, 64, kernel_size=4, stride=2),
             nn.ReLU(),
-            nn.Conv2d(64, 64, kernel_size=3, stride=1),    
+            nn.Conv2d(64, 64, kernel_size=3, stride=1),
             nn.ReLU()
         )
-        # work out the linear layer size with a dummy forward pass
-        with torch.no_grad():
-            dummy = torch.zeros(in_ch, 84, 84)
-           ## self.conv(dummy) to one vector
-            conv_out = self.conv(dummy).numel()
+        
+        # Calculate size of conv output
+        conv_out_size = self._get_conv_out((input_shape, 84, 90))
+        
+        # Value stream
         self.value_stream = nn.Sequential(
-            nn.Linear(conv_out, 512),
+            nn.Linear(conv_out_size, 512),
             nn.ReLU(),
             nn.Linear(512, 1)
         )
-        self.advantage_stream = nn.Sequential(  
-            nn.Linear(conv_out, 512),
+        
+        # Advantage stream
+        self.advantage_stream = nn.Sequential(
+            nn.Linear(conv_out_size, 512),
             nn.ReLU(),
             nn.Linear(512, n_actions)
         )
-        
-        
-
+    
+    def _get_conv_out(self, shape):
+        o = self.conv(torch.zeros(1, *shape))
+        return int(torch.prod(torch.tensor(o.size())))
+    
     def forward(self, x):
-                 # scale 0‑255 → 0‑1
-        if isinstance(x, np.ndarray):
-            x = torch.from_numpy(x)
-            
-        # scale 0‑255 → 0‑1
-        if x.dtype != torch.float32:
-            x = x.float() / 255.0
-        x = self.conv(x)
-        x  = x.view(x.size(0), -1)
-        value = self.value_stream(x)
-        advantage = self.advantage_stream(x)
-        q_value = value + advantage - advantage.mean(dim=1, keepdim=True)
+        if x.device != next(self.parameters()).device:
+            x = x.to(next(self.parameters()).device)
+        batch_size = x.size(0)
+        conv_out = self.conv(x).view(batch_size, -1)
         
-        ## compress x [ channel, width, height] into one vector and remains batch dimension
-        # print(x.shape)
+        # Calculate value and advantage
+        value = self.value_stream(conv_out)
+        advantage = self.advantage_stream(conv_out)
         
-        return q_value
+        # Combine value and advantage streams
+        # Q(s,a) = V(s) + (A(s,a) - mean(A(s,a')))
+        return value + advantage - advantage.mean(dim=1, keepdim=True)
