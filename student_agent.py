@@ -17,7 +17,7 @@ class Agent:
         # Load the pre-trained Rainbow DQN model
         from train_rainbow import RainbowDQN  # Import your model class
         self.policy_net = RainbowDQN(input_channels=4, n_actions=self.action_space.n)
-        self.policy_net.load_state_dict(torch.load(model_path, map_location=self.device))
+        self.policy_net.load_state_dict(torch.load(model_path,weights_only = True, map_location=self.device))
         self.policy_net.eval()
         
         # Frame processing
@@ -38,6 +38,7 @@ class Agent:
     def preprocess_frame(self, frame):
         """Convert raw frame to grayscale, resize, and normalize."""
         processed = self.transform(frame)
+        processed = processed/255
         return processed  # Shape: (1, 84, 84)
     
     def stack_frames(self, new_frame):
@@ -67,18 +68,16 @@ class Agent:
         # Stack frames
             self.frames.append(processed_frame)
             ## pick the action based on these frames
-            if random.random() < epsilon:
-                action = self.action_space.sample()
-            else:
-                with torch.no_grad():
+            
+            with torch.no_grad():
                     # Add batch dimension and send to device
-                    stacked_frames = torch.stack(list(self.frames), dim=0).to(self.device)
+                stacked_frames = torch.stack(list(self.frames), dim=0).to(self.device)
                     ## permute
-                    stacked_frames = np.transpose(stacked_frames, (1, 0, 2, 3))  # Shape: (4, 84, 84)
+                stacked_frames = np.transpose(stacked_frames, (1, 0, 2, 3))  # Shape: (4, 84, 84)
                     
-                    q_values = self.policy_net(stacked_frames)
-                    action = q_values.max(1)[1].item()
-                self.action = action
+                q_values = self.policy_net(stacked_frames)
+                action = q_values.max(1)[1].item()
+            self.action = action
             return action
 
     def reset(self):
