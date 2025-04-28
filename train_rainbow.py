@@ -31,16 +31,14 @@ LOG_EVERY    = 100     # Log stats every ... frames
 WARM_UP_SIZE = 10000
 EPOCH_SIZE   = 50000     # Define frames per epoch
 DEATH_PENALTY = -100
-BACKWARD_PENALTY = 0
-STAY_PENALTY = 0
 start_ep = 1
 NUMEP = 10000
 
 # PER Parameters
-ALPHA = 0.6         # Priority exponent
+ALPHA = 0.6        # Priority exponent
 BETA_START = 0.4    # Initial beta for importance sampling
 BETA_END = 1.0      # Final beta value
-BETA_FRAMES = 5000000  # Frames over which to anneal beta
+BETA_FRAMES = 5000000  
 
 if torch.cuda.is_available():
     device = torch.device("cuda")
@@ -100,10 +98,10 @@ def make_env():
 
 def obs_to_state(obs):
     """Convert observation to state for neural network input."""
-    state = np.array(obs)  # Convert to NumPy array
-    state = torch.from_numpy(state).float() / 255.0  # Normalize to [0, 1]
-    state = state.unsqueeze(0)  # Add batch dimension
-    return state  # Shape: (1, C, H, W)
+    state = np.array(obs)  
+    state = torch.from_numpy(state).float() / 255.0 
+    state = state.unsqueeze(0)  
+    return state  
 
 # ─────────────────────────── Noisy Linear Layer ─────────────────────────
 class NoisyLinear(nn.Module):
@@ -418,26 +416,20 @@ def train(path_policy=None, path_target=None):
             
             # Apply custom penalties
             done_flag = done and not truncated
-            cr = reward
+            curr_reward = reward
             x_pos, life = info.get('x_pos'), info.get('life')
             
-            if x_pos is not None:
-                if prev_x is None: prev_x = x_pos
-                dx = x_pos - prev_x
-                cr += BACKWARD_PENALTY if dx < 0 else STAY_PENALTY if dx == 0 else 0
-                prev_x = x_pos
-                
             if prev_life is None: 
                 prev_life = life
             elif life < prev_life: 
-                cr += DEATH_PENALTY
+                curr_reward += DEATH_PENALTY
                 prev_life = life
             
             # Add to episode reward
             episode_reward += reward
             
             # Store transition in replay memory
-            memory.push(state, action, cr, next_state, done_flag)
+            memory.push(state, action, curr_reward, next_state, done_flag)
             
             # Move to next state
             state = next_state
